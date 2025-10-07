@@ -1,45 +1,21 @@
 'use server';
-
-import { BigCommerceGQLError, removeEdgesAndNodes } from '@bigcommerce/catalyst-client';
+ 
+import { BigCommerceGQLError } from '@bigcommerce/catalyst-client';
 import { SubmissionResult } from '@conform-to/react';
 import { parseWithZod } from '@conform-to/zod';
+import { strict } from 'assert';
 import { getTranslations } from 'next-intl/server';
 import { z } from 'zod';
-
+ 
 import { SearchResult } from '@/vibes/soul/primitives/navigation';
-import { getSessionCustomerAccessToken } from '~/auth';
-import { client } from '~/client';
-import { graphql } from '~/client/graphql';
-import { revalidate } from '~/client/revalidate-target';
-import { searchResultsTransformer } from '~/data-transformers/search-results-transformer';
-import { getPreferredCurrencyCode } from '~/lib/currency';
-
-import { SearchProductFragment } from './fragment';
-
-const GetQuickSearchResultsQuery = graphql(
-  `
-    query getQuickSearchResults(
-      $filters: SearchProductsFiltersInput!
-      $currencyCode: currencyCode
-    ) {
-      site {
-        search {
-          searchProducts(filters: $filters) {
-            products(first: 5) {
-              edges {
-                node {
-                  ...SearchProductFragment
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  `,
-  [SearchProductFragment],
-);
-
+ 
+// 1. Import required Algolia dependencies, including the transformer and client
+import {
+  AlgoliaHit,
+  algoliaResultsTransformer,
+} from '~/data-transformers/search-results-transformer';
+import algoliaClient from '~/lib/algolia/client';
+ 
 export async function search(
   prevState: {
     lastResult: SubmissionResult | null;
@@ -47,7 +23,7 @@ export async function search(
     emptyStateTitle?: string;
     emptyStateSubtitle?: string;
   },
-  formData: FormData,
+  formData: FormData
 ): Promise<{
   lastResult: SubmissionResult | null;
   searchResults: SearchResult[] | null;
@@ -55,12 +31,14 @@ export async function search(
   emptyStateSubtitle: string;
 }> {
   const t = await getTranslations('Components.Header.Search');
-  const submission = parseWithZod(formData, { schema: z.object({ term: z.string() }) });
+  const submission = parseWithZod(formData, {
+    schema: z.object({ term: z.string() }),
+  });
   const emptyStateTitle = t('noSearchResultsTitle', {
     term: submission.status === 'success' ? submission.value.term : '',
   });
   const emptyStateSubtitle = t('noSearchResultsSubtitle');
-
+ 
   if (submission.status !== 'success') {
     return {
       lastResult: submission.reply(),
@@ -69,7 +47,7 @@ export async function search(
       emptyStateSubtitle,
     };
   }
-
+ 
   if (submission.value.term.length < 3) {
     return {
       lastResult: submission.reply(),
@@ -78,31 +56,33 @@ export async function search(
       emptyStateSubtitle,
     };
   }
-
-  const customerAccessToken = await getSessionCustomerAccessToken();
-
-  const currencyCode = await getPreferredCurrencyCode();
-
+ 
   try {
-    const response = await client.fetch({
-      document: GetQuickSearchResultsQuery,
-      variables: { filters: { searchTerm: submission.value.term }, currencyCode },
-      customerAccessToken,
-      fetchOptions: customerAccessToken ? { cache: 'no-store' } : { next: { revalidate } },
+    // 2. Ensure the Algolia index name is set
+    strict(process.env.ALGOLIA_INDEX_NAME);
+ 
+    // 3. Send the search term from the form submission to Algolia instead of
+    //    BigCommerce
+    const algoliaResults = await algoliaClient.searchSingleIndex<AlgoliaHit>({
+      indexName: process.env.ALGOLIA_INDEX_NAME,
+      searchParams: {
+        query: submission.value.term,
+        // 4. Add any filters you want to apply to the search results
+        filters: 'is_visible:true',
+      },
     });
-
-    const { products } = response.data.site.search.searchProducts;
-
+    
     return {
       lastResult: submission.reply(),
-      searchResults: await searchResultsTransformer(removeEdgesAndNodes(products)),
+      // 5. Transform the Algolia hits into SearchResult objects
+      searchResults: await algoliaResultsTransformer(algoliaResults.hits),
       emptyStateTitle,
       emptyStateSubtitle,
     };
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error(error);
-
+ 
     if (error instanceof BigCommerceGQLError) {
       return {
         lastResult: submission.reply({
@@ -113,7 +93,7 @@ export async function search(
         emptyStateSubtitle,
       };
     }
-
+ 
     if (error instanceof Error) {
       return {
         lastResult: submission.reply({ formErrors: [error.message] }),
@@ -122,10 +102,10 @@ export async function search(
         emptyStateSubtitle,
       };
     }
-
+ 
     return {
       lastResult: submission.reply({
-        formErrors: [t('somethingWentWrong')],
+        formErrors: [t('error')],
       }),
       searchResults: prevState.searchResults,
       emptyStateTitle,
